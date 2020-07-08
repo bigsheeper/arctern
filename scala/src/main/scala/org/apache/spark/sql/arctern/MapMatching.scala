@@ -18,12 +18,14 @@ package org.apache.spark.sql.arctern
 import java.util
 
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.arctern.MapMatching.{compute, expandEnvelope, mapMatchingQuery}
+import org.apache.spark.sql.{Column, DataFrame, Encoder, Encoders, Row, SparkSession}
 import org.apache.spark.sql.arctern.index.RTreeIndex
-import org.apache.spark.sql.types.{BooleanType, StructField, StructType}
+import org.apache.spark.sql.expressions.Aggregator
+import org.apache.spark.sql.types.{BooleanType, DoubleType, FloatType, IntegerType, LongType, NumericType, StringType, StructField, StructType}
 import org.locationtech.jts.geom.{Coordinate, Envelope, Geometry, GeometryFactory}
 
-object MapMatching {
+object MapMatching extends Serializable {
   val defaultExpandValue = 100 // default expand value: 100 meters
 
   private def RAD2DEG(x: Double): Double = x * 180.0 / scala.math.Pi
@@ -81,11 +83,143 @@ object MapMatching {
     (distance, x, y)
   }
 
-  private def computeNearRoad(point: Geometry, index: Broadcast[RTreeIndex], expandValue: Double): Boolean = {
-    val env = expandEnvelope(point.getEnvelopeInternal, expandValue)
-    val results = index.value.query(env)
-    results.size() > 0
+  //  private def computeNearRoad(point: Geometry, index: Broadcast[RTreeIndex], expandValue: Double): Boolean = {
+  //    val env = expandEnvelope(point.getEnvelopeInternal, expandValue)
+  //    val results = index.value.query(env)
+  //    results.size() > 0
+  //  }
+
+  private def buildIndex(roads: DataFrame): RTreeIndex = {
+    val index = new RTreeIndex
+    val idDataType = roads.col("roadsId").expr.dataType
+    if (!(idDataType match {
+      case _: NumericType => true
+    })) throw new Exception("Unsupported index data type.")
+    roads.collect().foreach {
+      row => {
+        val roadId = row.getAs[Int](0)
+        val geo = row.getAs[Geometry](1)
+        index.insert(geo.getEnvelopeInternal, roadId)
+      }
+    }
+    index
   }
+
+  def nearRoad(points: DataFrame, roads: DataFrame, pointsIndexColumn: Column, pointsColumn: Column, roadsIndexColumn: Column, roadsColumn: Column, expandValue: Double): DataFrame = {
+    val spark = SparkSession.builder().getOrCreate()
+
+    import spark.implicits._
+
+    val thisPoints = points.select(pointsIndexColumn.as("pointsId"), pointsColumn.as("points"))
+    val thisRoads = roads.select(roadsIndexColumn.as("roadsId"), roadsColumn.as("roads"))
+
+    val index = buildIndex(thisRoads)
+    val pointsDS = thisPoints.as[(Int, Geometry)]
+    val roadsDS = thisRoads.as[(Int, Geometry)]
+    val broadcast = spark.sparkContext.broadcast(index)
+
+    val query = pointsDS.flatMap {
+      tp => {
+        val (pointId, point) = tp
+        val rst = MapMatching.mapMatchingQuery(point, broadcast.value)
+        rst.toArray.map(roadId => (roadId.asInstanceOf[Int], pointId, point))
+      }
+    }.withColumnRenamed("_1", "roadsId")
+      .withColumnRenamed("_2", "pointsId")
+      .withColumnRenamed("_3", "points")
+
+    val joinQuery = query.join(roadsDS, "roadsId")
+    joinQuery.show(false)
+
+    // input: (Double, Geometry, Int, Geometry) => (distance, point, pointId, road)
+    // return: Geometry => resultGeometry
+    val computeCore = new Aggregator[(Int, Int, Geometry, Geometry), (Double, Geometry, Int, Geometry), Geometry] {
+      override def zero: (Double, Geometry, Int, Geometry) = (Double.MaxValue, null, -1, null)
+
+      override def reduce(b: (Double, Geometry, Int, Geometry), a: (Int, Int, Geometry, Geometry)): (Double, Geometry, Int, Geometry) = {
+        val point = a._3
+        val road = a._4
+        val rstProjection = MapMatching.compute(point, road)
+        if (rstProjection._1 <= b._1) (rstProjection._1, a._3, a._2, a._4)
+        else b
+      }
+
+      def merge(p1: (Double, Geometry, Int, Geometry), p2: (Double, Geometry, Int, Geometry)): (Double, Geometry, Int, Geometry) = {
+        if (p1._1 <= p2._1) p1
+        else p2
+      }
+
+      override def finish(reduction: (Double, Geometry, Int, Geometry)): Geometry = reduction._4
+
+      override def bufferEncoder: Encoder[(Double, Geometry, Int, Geometry)] = implicitly[Encoder[(Double, Geometry, Int, Geometry)]]
+
+      override def outputEncoder: Encoder[Geometry] = implicitly[Encoder[Geometry]]
+    }
+
+    val joinQueryDS = joinQuery.as[(Int, Int, Geometry, Geometry)]
+    joinQueryDS.show(false)
+    val rst = joinQueryDS.groupByKey(_._2).agg(computeCore.toColumn)
+//    val rst = joinQueryDS.groupBy("pointsId").agg(computeCore.toColumn)
+    println("************************************")
+    rst.show(false)
+    rst.toDF("pointsId", "nearestRoad")
+  }
+
+  //  def nearRoad(points: DataFrame, roads: DataFrame, pointsIndexColumn: Column, pointsColumn: Column, roadsIndexColumn: Column, roadsColumn: Column, expandValue: Double): DataFrame = {
+  //    val spark = SparkSession.builder().getOrCreate()
+  //
+  //    import spark.implicits._
+  //
+  //    val thisPoints = points.select(pointsIndexColumn.as("pointsId"), pointsColumn.as("points"))
+  //    val thisRoads = roads.select(roadsIndexColumn.as("roadsId"), roadsColumn.as("roads"))
+  //
+  //    val index = buildIndex(thisRoads)
+  //    val pointsDS = thisPoints.as[(Int, Geometry)]
+  //    val roadsDS = thisRoads.as[(Int, Geometry)]
+  //    val broadcast = spark.sparkContext.broadcast(index)
+  //
+  //    val query = pointsDS.flatMap {
+  //      tp => {
+  //        val (pointId, point) = tp
+  //        val rst = MapMatching.mapMatchingQuery(point, broadcast.value)
+  //        rst.toArray.map(roadId => (roadId.asInstanceOf[Int], pointId, point))
+  //      }
+  //    }.withColumnRenamed("_1", "roadsId").withColumnRenamed("_2", "pointsId").withColumnRenamed("_3", "points")
+  //
+  //    val joinQuery = query.join(roadsDS, "roadsId")
+  //    joinQuery.show(false)
+  //
+  //    // input: (Double, Geometry, Int, Geometry) => (distance, point, pointId, road)
+  //    // return: (Int, Geometry) => (pointId, resultGeometry)
+  //    val computeCore =  new Aggregator[(Int, Int, Geometry, Geometry), (Double, Geometry, Int, Geometry), (Int, Geometry)] {
+  //      override def zero: (Double, Geometry, Int, Geometry) = (Double.MaxValue, null, -1, null)
+  //
+  //      override def reduce(b: (Double, Geometry, Int, Geometry), a: (Int, Int, Geometry, Geometry)): (Double, Geometry, Int, Geometry) = {
+  //        val point = a._3
+  //        val road = a._4
+  //        val rstProjection = MapMatching.compute(point, road)
+  //        if (rstProjection._1 <= b._1) (rstProjection._1, a._3, a._2, a._4)
+  //        else b
+  //      }
+  //
+  //      def merge(p1: (Double, Geometry, Int, Geometry), p2: (Double, Geometry, Int, Geometry)): (Double, Geometry, Int, Geometry) = {
+  //        if (p1._1 <= p2._1) p1
+  //        else p2
+  //      }
+  //
+  //      override def finish(reduction: (Double, Geometry, Int, Geometry)): (Int, Geometry) = (reduction._3, reduction._4)
+  //
+  //      override def bufferEncoder: Encoder[(Double, Geometry, Int, Geometry)] = implicitly[Encoder[(Double, Geometry, Int, Geometry)]]
+  //      override def outputEncoder: Encoder[(Int, Geometry)] = implicitly[Encoder[(Int, Geometry)]]
+  //    }
+  //
+  //    val joinQueryDS = joinQuery.as[(Int, Int, Geometry, Geometry)]
+  //    joinQueryDS.show(false)
+  //    val rst = joinQueryDS.groupBy("pointsId").agg(computeCore.toColumn)
+  //    println("************************************")
+  //    rst.show(false)
+  //    rst
+  //  }
 
   private def computeNearestRoad(point: Geometry, index: Broadcast[RTreeIndex]): Geometry = {
     val results = mapMatchingQuery(point, index.value)
@@ -122,57 +256,107 @@ object MapMatching {
   }
 }
 
-class MapMatching {
-  private var roads: DataFrame = _
-
-  private var points: DataFrame = _
-
-  private val index: RTreeIndex = new RTreeIndex
-
-  private val spark = SparkSession.builder().getOrCreate()
-
-  private def setRoads(roads: DataFrame): Unit = this.roads = roads
-
-  private def setPoints(points: DataFrame): Unit = this.points = points
-
-  private def buildIndex(): Unit = {
-    val roadArray = roads.coalesce(numPartitions = 1).collect()
-    for (road <- roadArray) {
-      val roadGeometry = road.getAs[Geometry](0)
-      index.insert(roadGeometry.getEnvelopeInternal, roadGeometry)
-    }
-  }
-
-  def nearRoad(points: DataFrame, roads: DataFrame, expandValue: Double): DataFrame = {
-    setPoints(points)
-    setRoads(roads)
-    buildIndex()
-    val pointsRdd = points.rdd
-    val broadcast = spark.sparkContext.broadcast(index)
-    val rstRDD = pointsRdd.map(point => Row(MapMatching.computeNearRoad(point.getAs[Geometry](0), broadcast, expandValue)))
-    val rstSchema = StructType(Array(StructField("near_road", BooleanType, nullable = false)))
-    spark.createDataFrame(rstRDD, rstSchema)
-  }
-
-  def nearestRoad(points: DataFrame, roads: DataFrame): DataFrame = {
-    setPoints(points)
-    setRoads(roads)
-    buildIndex()
-    val pointsRdd = points.rdd
-    val broadcast = spark.sparkContext.broadcast(index)
-    val rstRDD = pointsRdd.map(point => Row(MapMatching.computeNearestRoad(point.getAs[Geometry](0), broadcast)))
-    val rstSchema = StructType(Array(StructField("nearest_road", new GeometryUDT, nullable = false)))
-    spark.createDataFrame(rstRDD, rstSchema)
-  }
-
-  def nearestLocationOnRoad(points: DataFrame, roads: DataFrame): DataFrame = {
-    setPoints(points)
-    setRoads(roads)
-    buildIndex()
-    val pointsRdd = points.rdd
-    val broadcast = spark.sparkContext.broadcast(index)
-    val rstRDD = pointsRdd.map(point => Row(MapMatching.computeNearestLocationOnRoad(point.getAs[Geometry](0), broadcast)))
-    val rstSchema = StructType(Array(StructField("nearest_location_on_road", new GeometryUDT, nullable = false)))
-    spark.createDataFrame(rstRDD, rstSchema)
-  }
-}
+//class MapMatching {
+//  private var roads: DataFrame = _
+//
+//  private var points: DataFrame = _
+//
+//  private val index: RTreeIndex = new RTreeIndex
+//
+//  private val spark = SparkSession.builder().getOrCreate()
+//
+//  private def setRoads(roads: DataFrame): Unit = this.roads = roads
+//
+//  private def setPoints(points: DataFrame): Unit = this.points = points
+//
+//  private def buildIndex(): Unit = {
+//    val idDataType = roads.col("roadsId").expr.dataType
+//    if (!(idDataType match { case _: NumericType => true })) throw new Exception("Unsupported index data type.")
+//    roads.collect().foreach {
+//      row => {
+//        val roadId = row.getAs[Int](0)
+//        val geo = row.getAs[Geometry](1)
+//        index.insert(geo.getEnvelopeInternal, roadId)
+//      }
+//    }
+//  }
+//
+//  def nearRoad(points: DataFrame, roads: DataFrame, pointsIndexColumn: Column, pointsColumn: Column, roadsIndexColumn: Column, roadsColumn: Column, expandValue: Double): DataFrame = {
+//    import spark.implicits._
+//
+//    setPoints(points.select(pointsIndexColumn.as("pointsId"), pointsColumn.as("points")))
+//    setRoads(roads.select(roadsIndexColumn.as("roadsId"), roadsColumn.as("roads")))
+//
+//    this.points.show(false)
+//    this.roads.show(false)
+//
+//    buildIndex()
+//    val pointsDS = this.points.as[(Int, Geometry)]
+//    val roadsDS = this.roads.as[(Int, Geometry)]
+//    val broadcast = spark.sparkContext.broadcast(index)
+//
+//    val query = pointsDS.flatMap {
+//      tp => {
+//        val (pointId, point) = tp
+//        val rst = MapMatching.mapMatchingQuery(point, broadcast.value)
+//        rst.toArray.map(roadId => (roadId.asInstanceOf[Int], pointId, point))
+//      }
+//    }.withColumnRenamed("_1", "roadsId").withColumnRenamed("_2", "pointsId").withColumnRenamed("_3", "points")
+//
+//    query.show(200, false)
+//
+//    val joinQuery = query.join(roadsDS, "roadsId")
+//
+//    // input: (Double, Geometry, Int, Geometry) => (distance, point, pointId, road)
+//    // return: (Int, Geometry) => (pointId, resultGeometry)
+//    val computeCore =  new Aggregator[(Int, Int, Geometry, Geometry), (Double, Geometry, Int, Geometry), (Int, Geometry)] {
+//      override def zero: (Double, Geometry, Int, Geometry) = (Double.MaxValue, null, -1, null)
+//
+//      override def reduce(b: (Double, Geometry, Int, Geometry), a: (Int, Int, Geometry, Geometry)): (Double, Geometry, Int, Geometry) = {
+//        val point = a._3
+//        val road = a._4
+//        val rstProjection = MapMatching.compute(point, road)
+//        if (rstProjection._1 <= b._1) (rstProjection._1, a._3, a._2, a._4)
+//        else b
+//      }
+//
+//      def merge(p1: (Double, Geometry, Int, Geometry), p2: (Double, Geometry, Int, Geometry)): (Double, Geometry, Int, Geometry) = {
+//        if (p1._1 <= p2._1) p1
+//        else p2
+//      }
+//
+//      override def finish(reduction: (Double, Geometry, Int, Geometry)): (Int, Geometry) = (reduction._3, reduction._4)
+//
+//      override def bufferEncoder: Encoder[(Double, Geometry, Int, Geometry)] = implicitly[Encoder[(Double, Geometry, Int, Geometry)]]
+//      override def outputEncoder: Encoder[(Int, Geometry)] = implicitly[Encoder[(Int, Geometry)]]
+//    }
+//
+//    joinQuery.show(200, false)
+//    val rst = joinQuery.as[(Int, Int, Geometry, Geometry)].groupBy("pointsId").agg(computeCore.toColumn)
+//    println("************************************")
+//    rst.show(false)
+//    rst
+//  }
+//
+//  def nearestRoad(points: DataFrame, roads: DataFrame): DataFrame = {
+//    setPoints(points)
+//    setRoads(roads)
+//    buildIndex()
+//    val pointsRdd = points.rdd
+//    val broadcast = spark.sparkContext.broadcast(index)
+//    val rstRDD = pointsRdd.map(point => Row(MapMatching.computeNearestRoad(point.getAs[Geometry](0), broadcast)))
+//    val rstSchema = StructType(Array(StructField("nearest_road", new GeometryUDT, nullable = false)))
+//    spark.createDataFrame(rstRDD, rstSchema)
+//  }
+//
+//  def nearestLocationOnRoad(points: DataFrame, roads: DataFrame): DataFrame = {
+//    setPoints(points)
+//    setRoads(roads)
+//    buildIndex()
+//    val pointsRdd = points.rdd
+//    val broadcast = spark.sparkContext.broadcast(index)
+//    val rstRDD = pointsRdd.map(point => Row(MapMatching.computeNearestLocationOnRoad(point.getAs[Geometry](0), broadcast)))
+//    val rstSchema = StructType(Array(StructField("nearest_location_on_road", new GeometryUDT, nullable = false)))
+//    spark.createDataFrame(rstRDD, rstSchema)
+//  }
+//}
