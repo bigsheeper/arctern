@@ -111,6 +111,7 @@ object MapMatching extends Serializable {
 
   def nearRoad(points: DataFrame, roads: DataFrame, pointsIndexColumn: Column, pointsColumn: Column, roadsIndexColumn: Column, roadsColumn: Column, expandValue: Double): DataFrame = {
     val spark = SparkSession.builder().getOrCreate()
+    case class UsingGeometry(geo: Geometry)
 
     import spark.implicits._
 
@@ -137,7 +138,7 @@ object MapMatching extends Serializable {
 
     // input: (Double, Geometry, Int, Geometry) => (distance, point, pointId, road)
     // return: Geometry => resultGeometry
-    val computeCore = new Aggregator[(Int, Int, Geometry, Geometry), (Double, Geometry, Int, Geometry), String] {
+    val computeCore = new Aggregator[(Int, Int, Geometry, Geometry), (Double, Geometry, Int, Geometry), (Geometry, Geometry)] {
       override def zero: (Double, Geometry, Int, Geometry) = (Double.MaxValue, null, -1, null)
 
       override def reduce(b: (Double, Geometry, Int, Geometry), a: (Int, Int, Geometry, Geometry)): (Double, Geometry, Int, Geometry) = {
@@ -153,26 +154,30 @@ object MapMatching extends Serializable {
         else p2
       }
 
-      override def finish(reduction: (Double, Geometry, Int, Geometry)): String = reduction._4.toText
+      override def finish(reduction: (Double, Geometry, Int, Geometry)): (Geometry, Geometry) = (reduction._2, reduction._4)
 
       override def bufferEncoder: Encoder[(Double, Geometry, Int, Geometry)] = implicitly[Encoder[(Double, Geometry, Int, Geometry)]]
 
 //      override def outputEncoder: Encoder[GenericArrayData] = implicitly[Encoder[GenericArrayData]]
 //      override def outputEncoder: Encoder[Geometry] = Encoders.product[GeometryUDT]
+//      override def outputEncoder: Encoder[UsingGeometry] = implicitly[Encoder[UsingGeometry]]
+//      override def outputEncoder: Encoder[Geometry] = Encoders.bean[Geometry](classOf[Geometry])
+//      override def outputEncoder: Encoder[Geometry] = Encoders.product[Geometry]
+//      override def outputEncoder: Encoder[Geometry] = Encoders.kryo[Geometry]
+      override def outputEncoder: Encoder[(Geometry, Geometry)] = implicitly[Encoder[(Geometry, Geometry)]]
 //      override def outputEncoder: Encoder[Geometry] = Encoders.kryo
-      override def outputEncoder: Encoder[String] = implicitly[Encoder[String]]
+//      override def outputEncoder: Encoder[String] = implicitly[Encoder[String]]
     }
 
     val joinQueryDS = joinQuery.as[(Int, Int, Geometry, Geometry)]
     joinQueryDS.show(false)
-    val rstDS = joinQueryDS.groupByKey(_._2).agg(computeCore.toColumn)
-//    val rst = joinQueryDS.groupBy("pointsId").agg(computeCore.toColumn)
+    val aggRstDS = joinQueryDS.groupByKey(_._2).agg(computeCore.toColumn)
+//    val aggRstDS = joinQueryDS.groupBy("pointsId").agg(computeCore.toColumn)
     println("************************************")
-    rstDS.show(false)
-    val rstDF = rstDS.toDF("pointsId", "nearestRoad")
-    val rst = rstDF.select(col("pointsId"), st_geomfromtext(col("nearestRoad")))
-    rst.show(false)
-    rst
+    aggRstDS.show(false)
+    val rstDF = aggRstDS.toDF("pointsId", "nearestRoad")
+    rstDF.show(false)
+    rstDF
 //    val rst = rstDF.select(col("pointsId"), ST_GeomFromWKB(Seq(col("nearestRoad").expr)))
   }
 
