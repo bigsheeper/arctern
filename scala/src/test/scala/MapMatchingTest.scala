@@ -70,17 +70,17 @@ class MapMatchingTest extends AdapterTest {
 //    assert(collect(9).getAs[Boolean](0) == false)
   }
 
-//  test("NearestRoad") {
-//    val pointSchema = StructType(Array(StructField("points", new GeometryUDT, nullable = false)))
-//    val roadSchema = StructType(Array(StructField("roads", new GeometryUDT, nullable = false)))
-//
-//    val pointsDF = spark.createDataFrame(spark.sparkContext.parallelize(points), pointSchema)
-//    val roadsDF = spark.createDataFrame(spark.sparkContext.parallelize(roads), roadSchema)
-//
-//    val rst = nearest_road(pointsDF, roadsDF)
-//    rst.show(false)
-//
-//    val collect = rst.collect()
+  test("NearestRoad") {
+    val pointSchema = StructType(Array(StructField("pointsId", IntegerType, nullable = false), StructField("points", new GeometryUDT, nullable = false)))
+    val roadSchema = StructType(Array(StructField("roadsId", IntegerType, nullable = false), StructField("roads", new GeometryUDT, nullable = false)))
+
+    val pointsDF = spark.createDataFrame(spark.sparkContext.parallelize(points), pointSchema)
+    val roadsDF = spark.createDataFrame(spark.sparkContext.parallelize(roads), roadSchema)
+
+    val rst = nearest_road(pointsDF, roadsDF, pointsDF.col("pointsId"), pointsDF.col("points"), roadsDF.col("roadsId"), roadsDF.col("roads"))
+    rst.show(false)
+
+    val collect = rst.collect()
 //    assert(collect(0).getAs[Geometry](0).toText == "LINESTRING (-73.9611014 40.7608112, -73.9610636 40.7608639)")
 //    assert(collect(1).getAs[Geometry](0).toText == "LINESTRING (-73.9611014 40.7608112, -73.9610636 40.7608639)")
 //    assert(collect(2).getAs[Geometry](0).toText == "LINESTRING (-73.9611014 40.7608112, -73.9610636 40.7608639)")
@@ -91,28 +91,28 @@ class MapMatchingTest extends AdapterTest {
 //    assert(collect(7).getAs[Geometry](0).toText == "LINESTRING (-73.9978864 40.714317, -73.997674 40.7140968)")
 //    assert(collect(8).getAs[Geometry](0).toText == "LINESTRING (-73.961609 40.7602969, -73.9615014 40.7602517)")
 //    assert(collect(9).getAs[Geometry](0).toText == "LINESTRING (-73.961609 40.7602969, -73.9615014 40.7602517)")
-//  }
-//
-//  test("NearestLocationOnRoad") {
-//    val pointSchema = StructType(Array(StructField("points", new GeometryUDT, nullable = false)))
-//    val roadSchema = StructType(Array(StructField("roads", new GeometryUDT, nullable = false)))
-//
-//    val pointsDF = spark.createDataFrame(spark.sparkContext.parallelize(points), pointSchema)
-//    val roadsDF = spark.createDataFrame(spark.sparkContext.parallelize(roads), roadSchema)
-//
-//    val rst = nearest_location_on_road(pointsDF, roadsDF)
-//    rst.show(false)
-//
-//    val collect = rst.collect()
-//    assert(collect(0).getAs[Geometry](0).toText == "POINT (-73.9611014 40.7608112)")
-//    assert(collect(1).getAs[Geometry](0).toText == "POINT (-73.9610636 40.7608639)")
-//    assert(collect(2).getAs[Geometry](0).toText == "POINT (-73.9610636 40.7608639)")
-//    assert(collect(3).getAs[Geometry](0).toText == "POINT (-73.9615569 40.7601753)")
-//    assert(collect(4).getAs[Geometry](0).toText == "POINT (-73.9984728 40.7136003)")
-//    assert(collect(5).getAs[Geometry](0).toText == "POINT (-73.961609 40.7602969)")
-//    assert(collect(6).getAs[Geometry](0).toText == "POINT (-73.961609 40.7602969)")
-//    assert(collect(7).getAs[Geometry](0).toText == "POINT (-73.9978864 40.714317)")
-//    assert(collect(8).getAs[Geometry](0).toText == "POINT (-73.961609 40.7602969)")
-//    assert(collect(9).getAs[Geometry](0).toText == "POINT (-73.961609 40.7602969)")
-//  }
+  }
+
+  test("NearestLocationOnRoad") {
+    val pointSchema = StructType(Array(StructField("pointsId", IntegerType, nullable = false), StructField("points", new GeometryUDT, nullable = false)))
+    val roadSchema = StructType(Array(StructField("roadsId", IntegerType, nullable = false), StructField("roads", new GeometryUDT, nullable = false)))
+
+    val pointsDF = spark.createDataFrame(spark.sparkContext.parallelize(points), pointSchema)
+    val roadsDF = spark.createDataFrame(spark.sparkContext.parallelize(roads), roadSchema)
+
+    val rst = nearest_location_on_road(pointsDF, roadsDF, pointsDF.col("pointsId"), pointsDF.col("points"), roadsDF.col("roadsId"), roadsDF.col("roads"))
+    rst.show(false)
+
+    val collect = rst.collect()
+//    assert(collect(0).getAs[Geometry](1).toText == "POINT (-73.9611014 40.7608112)")
+//    assert(collect(1).getAs[Geometry](1).toText == "POINT (-73.9610636 40.7608639)")
+//    assert(collect(2).getAs[Geometry](1).toText == "POINT (-73.9610636 40.7608639)")
+//    assert(collect(3).getAs[Geometry](1).toText == "POINT (-73.9615569 40.7601753)")
+//    assert(collect(4).getAs[Geometry](1).toText == "POINT (-73.9984728 40.7136003)")
+//    assert(collect(5).getAs[Geometry](1).toText == "POINT (-73.961609 40.7602969)")
+//    assert(collect(6).getAs[Geometry](1).toText == "POINT (-73.961609 40.7602969)")
+//    assert(collect(7).getAs[Geometry](1).toText == "POINT (-73.9978864 40.714317)")
+//    assert(collect(8).getAs[Geometry](1).toText == "POINT (-73.961609 40.7602969)")
+//    assert(collect(9).getAs[Geometry](1).toText == "POINT (-73.961609 40.7602969)")
+  }
 }
